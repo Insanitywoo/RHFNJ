@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     DEEPSEEK_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
     DATABASE_URL: str = "sqlite:///./rhfnj.db"
+    VECTOR_DB_PATH: str = "./data/vector_store"
 
 
 settings = Settings()
