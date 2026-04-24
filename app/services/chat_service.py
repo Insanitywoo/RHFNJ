@@ -1,69 +1,82 @@
-from langchain_core.prompts import (
-    ChatPromptTemplate,
-    SystemMessagePromptTemplate,
-    HumanMessagePromptTemplate,
-)
-from langchain_core.runnables import RunnablePassthrough
-from langchain_openai import ChatOpenAI
+from sqlalchemy import select
+from sqlalchemy.orm import Session, selectinload
 
-from app.services.pdf_processor import get_vector_db
-from app.core.config import settings
+from app.models.chat import ChatMessage, ChatSession
 
 
-def get_retriever():
-    vector_db = get_vector_db()
-    return vector_db.as_retriever(search_kwargs={"k": 10})
-
-
-async def stream_rag_chat(question: str):
-    retriever = get_retriever()
-    docs = retriever.invoke(question)
-
-    print(f"DEBUG: Retrieved {len(docs)} chunks")
-
-    context_parts = []
-    for doc in docs:
-        source = doc.metadata.get("source", "Unknown")
-        page = doc.metadata.get("page", "Unknown")
-        context_parts.append(f"[Source: {source}, Page: {page}]\n{doc.page_content}")
-    context = "\n\n".join(context_parts)
-
-    system_template = """You are now a multi-document research assistant.
-
-You have access to a library of papers.
-
-For every statement you make, you MUST explicitly cite which paper (filename) and page number it comes from.
-
-You MUST answer based ONLY on the provided context.
-
-You MUST strictly use Markdown formatting.
-
-When listing items, authors, or points, you MUST use bullet points (- ).
-
-CRITICAL: You MUST insert a double newline after EVERY paragraph, every bullet point, and every heading to ensure proper vertical spacing.
-
-Context: {context}
-
-Question: {question}
-"""
-
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            SystemMessagePromptTemplate.from_template(system_template),
-            HumanMessagePromptTemplate.from_template("{question}"),
-        ]
+def create_chat_session(
+    db: Session,
+    *,
+    source_name: str | None = None,
+    title: str | None = None,
+) -> ChatSession:
+    session = ChatSession(
+        title=title or (source_name or "New Chat"),
+        source_name=source_name,
     )
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    return session
 
-    llm = ChatOpenAI(
-        model="deepseek-chat",
-        base_url="https://api.deepseek.com",
-        api_key=settings.DEEPSEEK_API_KEY,
-        streaming=True,
+
+def get_chat_session(db: Session, session_id: int) -> ChatSession | None:
+    statement = select(ChatSession).where(ChatSession.id == session_id)
+    return db.scalar(statement)
+
+
+def list_chat_sessions(db: Session) -> list[ChatSession]:
+    statement = select(ChatSession).order_by(ChatSession.updated_at.desc(), ChatSession.id.desc())
+    return list(db.scalars(statement))
+
+
+def delete_chat_session(db: Session, session: ChatSession) -> None:
+    db.delete(session)
+    db.commit()
+
+
+def delete_chat_sessions_for_source(db: Session, *, source_name: str) -> int:
+    statement = select(ChatSession).where(ChatSession.source_name == source_name)
+    sessions = list(db.scalars(statement))
+    count = len(sessions)
+    for session in sessions:
+        db.delete(session)
+    db.commit()
+    return count
+
+
+def list_chat_session_messages(db: Session, session_id: int) -> ChatSession | None:
+    statement = (
+        select(ChatSession)
+        .options(selectinload(ChatSession.messages))
+        .where(ChatSession.id == session_id)
     )
+    return db.scalar(statement)
 
-    chain = (
-        {"context": lambda x: context, "question": RunnablePassthrough()} | prompt | llm
+
+def save_chat_message(
+    db: Session,
+    *,
+    session_id: int,
+    role: str,
+    content: str,
+    source_name: str | None = None,
+) -> ChatMessage:
+    message = ChatMessage(
+        session_id=session_id,
+        role=role,
+        content=content,
+        source_name=source_name,
     )
+    db.add(message)
 
-    async for chunk in chain.astream(question):
-        yield chunk.content
+    session = get_chat_session(db, session_id)
+    if session is not None:
+        if role == "user" and session.title in {"New Chat", session.source_name or "", ""}:
+            session.title = content.strip()[:80] or session.title
+        if source_name and not session.source_name:
+            session.source_name = source_name
+
+    db.commit()
+    db.refresh(message)
+    return message

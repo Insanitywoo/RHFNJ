@@ -1,73 +1,40 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, UploadFile, File, HTTPException
+
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-import os
-import shutil
 
+from app.api.router import api_router
 from app.core.config import settings
-from app.api import chat
-from app.services.pdf_processor import index_pdf, get_vector_db
-
-
-PAPERS_DIR = "data/papers"
+from app.core.logging import setup_logging
+from app.db.session import init_db
+from app.services.document_service import ensure_storage_dirs
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    print("RHFNJ is starting...")
-
-    os.makedirs(PAPERS_DIR, exist_ok=True)
-    print(f"Created {PAPERS_DIR} directory")
-
+async def lifespan(_: FastAPI):
+    setup_logging()
+    ensure_storage_dirs()
+    init_db()
     yield
-    print("RHFNJ is shutting down...")
 
 
-app = FastAPI(
-    title=settings.PROJECT_NAME,
-    version="1.0.0",
-    lifespan=lifespan,
-)
+def create_app() -> FastAPI:
+    app = FastAPI(
+        title=settings.PROJECT_NAME,
+        version=settings.APP_VERSION,
+        lifespan=lifespan,
+    )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.CORS_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
-app.include_router(chat.router)
-
-
-@app.get("/api/v1/health")
-async def health_check():
-    return {"status": "ok"}
+    app.include_router(api_router, prefix=settings.API_V1_PREFIX)
+    return app
 
 
-@app.post("/api/v1/files/upload")
-async def upload_file(file: UploadFile = File(...)):
-    if not file.filename.endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are allowed")
-
-    file_path = os.path.join(PAPERS_DIR, file.filename)
-
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
-    try:
-        vector_db = get_vector_db()
-        existing = vector_db.similarity_search("dummy", k=1)
-
-        index_pdf(file_path)
-
-        return JSONResponse(
-            {
-                "status": "success",
-                "filename": file.filename,
-                "message": "File uploaded and indexed successfully",
-            }
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to index file: {str(e)}")
+app = create_app()

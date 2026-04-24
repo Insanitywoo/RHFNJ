@@ -1,14 +1,16 @@
-import os
+from functools import lru_cache
+
 import torch
-from transformers import AutoTokenizer, AutoModel
 from langchain_chroma import Chroma
 from langchain_core.embeddings import Embeddings
+from transformers import AutoModel, AutoTokenizer
 
 from app.core.config import settings
+from app.services.document_service import ensure_storage_dirs
 
 
 class LocalEmbeddings(Embeddings):
-    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
+    def __init__(self, model_name: str):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModel.from_pretrained(model_name)
         self.model.eval()
@@ -24,7 +26,11 @@ class LocalEmbeddings(Embeddings):
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         inputs = self.tokenizer(
-            texts, padding=True, truncation=True, max_length=512, return_tensors="pt"
+            texts,
+            padding=True,
+            truncation=True,
+            max_length=512,
+            return_tensors="pt",
         )
         with torch.no_grad():
             outputs = self.model(**inputs)
@@ -35,19 +41,19 @@ class LocalEmbeddings(Embeddings):
         return self.embed_documents([text])[0]
 
 
-def get_embeddings():
-    return LocalEmbeddings()
+@lru_cache(maxsize=1)
+def get_embeddings() -> LocalEmbeddings:
+    return LocalEmbeddings(settings.EMBEDDING_MODEL_NAME)
 
 
-def get_vector_db():
-    os.makedirs(settings.VECTOR_DB_PATH, exist_ok=True)
+def get_vector_db() -> Chroma:
+    ensure_storage_dirs()
     return Chroma(
         embedding_function=get_embeddings(),
-        persist_directory=settings.VECTOR_DB_PATH,
+        persist_directory=str(settings.vector_db_path),
     )
 
 
-def add_documents_to_db(documents):
+def delete_document_vectors(*, source_name: str) -> None:
     vector_db = get_vector_db()
-    vector_db.add_documents(documents)
-    return len(documents)
+    vector_db.delete(where={"source_name": source_name})
